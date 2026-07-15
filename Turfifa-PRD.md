@@ -66,6 +66,8 @@ The **Tactical Analytics & Turf Booking Platform (Turfifa)** is a production-rea
   * *The Gatekeeper Range Rule:* Selectable bounds are strictly capped between **40 and 95**. Values can scale up to **100** only when an attribute accumulates **10** separate, unique user verification endorsements from matches.
   * *Modification Prevention:* Once committed, the fields freeze. Users attempting to submit a field late get an explicit warning prompt directing them to file an Admin adjustment dispute request form.
 
+* **Email Verification & Password Reset:** Registration sends a verification email (BetterAuth email/OTP flow); unverified accounts can browse `/explore` but cannot book, host, or apply to matches. Password reset is a standard email-link flow. Both are in scope for this project since BetterAuth ships them natively — no custom token plumbing required.
+
 ### Epic 2: Contractual Matchmaking & The Scouting Engine
 
 * **Tri-State Status Lifecycle:** Players dynamically switch status profiles between Idle ⚪, Organizing 🔵, or Interested to Play 🟢. Status flips automatically to Idle when active windows expire.
@@ -80,7 +82,9 @@ The **Tactical Analytics & Turf Booking Platform (Turfifa)** is a production-rea
 * **Contract Cooldowns & Short-Notice Penalty Descents:**
   * Once a player and an organizing scouter agree to a slot, they enter a locked contract.
   * If a party cancels, a **6-hour global application cooldown lock** enforces onto the canceling user account instantly.
-  * *Late Pull-Out Trigger:* If a drop occurs within **2 hours** of kickoff, an immediate automated ticket is dispatched to the `admin_alerts` stream database collection, flagging the user for fast administrative manual review.
+  * *Late Pull-Out Trigger:* If a drop occurs within **2 hours** of kickoff, an immediate automated ticket is dispatched to the `admin_alerts` stream database collection (schema in §10), flagging the user for fast administrative manual review.
+
+* **Team / Squad Formation:** An Organizing player (🔵) hosts a match and owns a `TeamModel` (see §10) capped at a format-derived roster size (e.g., 12 for 6v6 including subs). Players discover open teams via the Difficulty Sorting Ladder and send a join request (*Requested*); the captain accepts or declines from the **Offers & Requests Matrix**. Accepted members appear in the team's confirmed roster, which feeds the navbar Match hub's teammate list (§9) and the Gameweeks Ledger's endorsement flow (§5). A captain can also directly *Offer* a slot to a specific player, bypassing the open-request queue.
 
 ### Epic 3: High-Yield Slot Engine & Booking Workflows
 
@@ -145,6 +149,13 @@ Present on every route (public and private). Must ship with fully working links 
 * **Social Links:** Real or realistic outbound links (e.g., Facebook, Instagram, X) opening in a new tab.
 * **Legal:** Links to Privacy Policy / Terms (can be lightweight static content, but must not 404).
 
+### Error, Empty & Abuse-Prevention States
+
+* **404 / Not Found:** Custom `not-found.tsx` styled with the shared token theme (not a stock Next.js page), with a CTA back to `/` and `/explore`.
+* **500 / Runtime Error:** Route-level `error.tsx` boundaries on `/explore`, `/explore/:id`, and all dashboard routes, offering a retry action instead of a blank crash screen.
+* **Empty States:** Every list surface that can legitimately be empty (Explore results after filtering, My Bookings, Manage Inventories, Offers & Requests Matrix, Gameweeks Ledger, Admin queues) ships a designed empty state — icon/illustration plus one line of real copy and a relevant CTA. Counts as content, so it must not be a bare "No data" string (violates the "no placeholder content" rule).
+* **Rate Limiting:** Public unauthenticated write endpoints — `/contact` submission and the newsletter signup — are rate-limited server-side (e.g., IP-keyed, 5 requests/hour) to match the hardening already applied to auth and payment IPN routes. Authenticated write routes (booking, join requests, reviews) are rate-limited per-user to blunt scripted abuse.
+
 ### Protected Player Dashboard Structure (3 Sub-Routes)
 
 1. **My Bookings:** Historical timeline stack tracing the user's latest 20 confirmed reservations.
@@ -162,7 +173,11 @@ Present on every route (public and private). Must ship with fully working links 
 ### Protected Admin Operations Dashboard
 
 * **Global Auditing Feed:** Oversees global profiles with immediate commands to freeze, limit, or remove toxic users or fraudulent venues. Because sessions are server-side (BetterAuth), a freeze/ban **revokes the offender's active session on their very next request** — no waiting for a token to expire.
-* **Dispute Center Desk:** Real-time monitoring panel housing short-notice cancellation alerts and base-parameter modification adjustment request streams.
+* **Dispute Center Desk:** Real-time monitoring panel housing short-notice cancellation alerts and base-parameter modification adjustment request streams. Both feeds read from the typed `AdminAlertModel` collection (§10) — the `admin_alerts` name used elsewhere in this doc refers to the same collection.
+
+### Notifications
+
+* **In-App Only (MVP scope):** The `[Match 🔔]` navbar badge (§9) and dashboard toast/banner surfaces are the only notification channels for this project — no email or push notifications are required to satisfy the assignment. Notification records are typed as `NotificationModel` (§10) and are created server-side whenever a contract is confirmed, cancelled, refunded, or an endorsement request is made.
 
 ---
 
@@ -357,10 +372,22 @@ export type AccountStatus = 'active' | 'limited' | 'frozen' | 'banned';
 export type SlotLifecycle = 'available' | 'held' | 'booked';
 export type PaymentStatus = 'unpaid' | 'pending' | 'paid' | 'refund_pending' | 'refunded';
 export type RefundStatus = 'none' | 'requested' | 'succeeded' | 'failed';
+export type AdminAlertType = 'late_pull_out' | 'attribute_dispute' | 'user_report' | 'refund_failure';
+export type AdminAlertStatus = 'open' | 'reviewing' | 'resolved';
+export type NotificationType = 'booking_confirmed' | 'booking_cancelled' | 'refund_update' | 'match_invite' | 'endorsement_request';
 
 // NOTE: Auth is handled by BetterAuth with server-side, DB-backed sessions.
 // Session + account records are managed by BetterAuth; `accountStatus` below is the
 // moderation flag the Admin toggles — an admin block invalidates live sessions instantly.
+
+// NOTE: Currency — all `amount`/price fields are integer BDT (Bangladeshi Taka), no minor-unit
+// subdivision (SSLCommerz's local rails settle in whole Taka). A `currency` literal is kept on
+// BookingContract for forward-compatibility, but is not user-selectable in this project.
+//
+// NOTE: Timezone — every stored timestamp is UTC ISO-8601. All `"HH:MM"` fields (opening/closing/
+// slot windows) are interpreted in Asia/Dhaka (UTC+6) at render and cutoff-calculation time; the
+// 2-hour late-pull-out and 10-minute hold-window checks always compare against server UTC `now()`
+// converted through that fixed offset, never the client's local time.
 
 export interface AttributeStats {
   value: number;                 // 40–95 baseline; scales up to 100 once endorsedByUsers >= 10
@@ -432,7 +459,8 @@ export interface BookingContract {
   flaggedToAdmin: boolean;       // true when dropped within 2h of kickoff
 
   // Payments (SSLCommerz)
-  amount: number;
+  amount: number;                // integer BDT
+  currency: 'BDT';
   paymentStatus: PaymentStatus;
   sslTranId?: string;            // SSLCommerz transaction id
   sslBankTranId?: string;        // stored for refund calls
@@ -444,5 +472,58 @@ export interface BookingMetrics {
   month: string;
   totalBookings: number;
   totalSpent: number;
+}
+
+export interface ReviewModel {
+  reviewId: string;
+  authorId: string;              // player who wrote the review
+  targetType: 'venue' | 'player';
+  targetId: string;               // FK -> FieldVenueModel.id or PlayerSchemaModel.id
+  bookingContractId?: string;      // optional FK tying the review to a completed booking/match
+  rating: number;                  // 1-5
+  comment: string;
+  createdAt: string;
+}
+
+export interface TeamModel {
+  teamId: string;
+  captainId: string;             // FK -> organizing player (PlayerSchemaModel.id)
+  fieldId: string;                // FK -> FieldVenueModel (venue the match is hosted at)
+  slotId: string;                 // FK -> SlotConfiguration
+  format: PlayerFormat;
+  rosterLimit: number;            // derived from format, e.g. 5v5 -> 10, 6v6 -> 12, 7v7 -> 14
+  roster: {
+    playerId: string;
+    joinedAt: string;
+    role: 'captain' | 'member';
+  }[];
+  pendingRequests: {
+    playerId: string;
+    direction: 'requested' | 'offered'; // 'requested' = player -> team, 'offered' = captain -> player
+    createdAt: string;
+  }[];
+  createdAt: string;
+}
+
+export interface AdminAlertModel {
+  alertId: string;
+  type: AdminAlertType;
+  status: AdminAlertStatus;
+  subjectUserId: string;          // the flagged/reporting user
+  relatedContractId?: string;     // FK -> BookingContract, when applicable
+  details: string;
+  createdAt: string;
+  resolvedAt?: string | null;
+  resolvedByAdminId?: string | null;
+}
+
+export interface NotificationModel {
+  notificationId: string;
+  userId: string;                 // recipient
+  type: NotificationType;
+  message: string;
+  relatedContractId?: string;
+  read: boolean;
+  createdAt: string;
 }
 ```

@@ -2,6 +2,9 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono, Montserrat, Merriweather } from "next/font/google";
 import "./globals.css";
 import { cn } from "@/lib/utils";
+import { Navbar, Footer } from "@/components/shared/navbar-footer";
+import { RouteSync } from "@/components/shared/route-sync";
+import { Toaster } from "@/components/ui/toaster";
 
 const merriweatherHeading = Merriweather({subsets:['latin'],variable:'--font-heading'});
 
@@ -32,7 +35,13 @@ export default function RootLayout({
       lang="en"
       className={cn("h-full", "antialiased", geistSans.variable, geistMono.variable, "font-sans", montserrat.variable, merriweatherHeading.variable)}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <RouteSync />
+        <Navbar />
+        <main className="flex flex-1 flex-col">{children}</main>
+        <Footer />
+        <Toaster />
+      </body>
     </html>
   );
 }
