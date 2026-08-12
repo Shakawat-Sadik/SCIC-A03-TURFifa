@@ -1,0 +1,1234 @@
+# Product Requirement Document (PRD)
+
+**Project Name:** Turfifa
+
+**Author:** Shakawat Sadik (Full-Stack Developer)
+
+**Status:** Approved / Production Specs
+
+---
+
+## 1. Technology Stack & Architecture Reference
+
+**Binding backend spec:** `docs/SCIC_EJP-13 Backend Project Requirements.md` is the hard requirement for this project. Every item in its checklist (Express.js, TypeScript, Prisma ORM, PostgreSQL, JWT, bcrypt, the `server/` folder layout, ≥4 services, ≥2 enums, soft delete, timestamps, `@@map()`, full CRUD per module, the `{success, message, data}` response envelope, and API documentation) is treated as non-negotiable. Where an earlier draft of this PRD proposed a different technology (MongoDB/Mongoose, BetterAuth, a single Next.js codebase), that draft is superseded by this section.
+
+### Two-Repository Architecture
+
+Turfifa ships as **two separate repositories**, each independently deployed:
+
+* **`turfifa.com`** (this repo) — the Next.js frontend. Contains no database access and no auth logic of its own; it is a pure API consumer.
+* **`turfifa.com-behind_the_scene`** (new repo) — the Express.js + TypeScript + Prisma + PostgreSQL backend. Owns the database, authentication, and all business logic. Structure specified in §12.
+
+### Frontend Stack (this repo)
+
+* **Framework:** Next.js (App Router), TypeScript, Tailwind CSS, Shadcn/UI.
+* **Package Manager & Tooling:** pnpm; Shadcn/UI and the OKLCH token theme are scaffolded via a shared preset (setup command and full token contract in §7).
+* **Data Visualization:** Recharts (radar, bar, line/area, and pie chart families), themed from the `--chart-*` tokens.
+* **Frontend Call Routing (three layers, not one):**
+  * **Server Components → direct `fetch()`.** Public/SSR reads (`/explore`, `/explore/:id`, landing metrics) fetch straight from the Next.js server to Express. Server-to-server, so browser CORS doesn't apply here — nothing lost, and it gets Next's built-in fetch caching for free.
+  * **`lib/api-client.ts` (client component, browser → Express directly) — the primary path for everything authenticated/interactive:** login, register, dashboards, booking, inline slot editing, admin actions. A typed `fetch` wrapper pointed at `NEXT_PUBLIC_API_BASE_URL`, unwrapping the `{success, message, data}` envelope (§11) and attaching the JWT access token (held in the `useAppStore` zustand store, in memory only — never `localStorage`) as `Authorization: Bearer <token>`. On a `401` it reacts, not pre-emptively decodes expiry: calls `POST /api/auth/refresh` once (`credentials: 'include'`, so the httpOnly refresh cookie rides along cross-origin), retries the original request, and redirects to `/login` if refresh also fails. This is the layer that actually exercises Express's `cors()` middleware and the bearer-token flow end to end.
+  * **`lib/actions.ts` (Server Action, Next server → Express) — reserved for public, unauthenticated writes only:** `/contact` and the newsletter signup (§5). These benefit from progressive enhancement (working without client JS) and are rate-limited server-side rather than per-user, so routing them through the Next server is a genuine fit. Not widened into a BFF-for-everything — see the caution below.
+  * **Guardrail:** if `next.config`'s `serverActions.allowedOrigins` is ever misconfigured, or a `"use server"` export gets called from a context that bundles it client-side, a Server Action call can end up looking like a browser request and tripping Next's own origin check (which resembles, but isn't, CORS). If that happens, it's a bundling bug to fix, not a signal to add `cors()` handling to the Server Action path.
+* **Media Storage:** Cloudinary for all venue images and avatar uploads (signed uploads; the frontend requests a signed upload signature from the backend, then uploads directly to Cloudinary — no binary blobs pass through either server).
+* **Access Control:** Role-Based Access Control (RBAC) across three classes — Player (Buyer), Turf Manager (Seller), and System Admin — enforced server-side by Express middleware (§11) and mirrored client-side only for UI gating (hiding links, redirecting), never as the actual security boundary.
+* **Hosting & Deployment:** Vercel for the frontend, deploying `main` on every merge.
+
+### Backend Stack (`turfifa.com-behind_the_scene` repo)
+
+* **Server Runtime:** Express.js on Node.js, strict TypeScript mode. A genuine standalone HTTP server — not Next.js Route Handlers.
+* **Database:** PostgreSQL hosted on **Supabase** (satisfies the assignment's "PostgreSQL / Supabase / NeonDB" allowance). Supabase is used **strictly as a Postgres host** — not its Auth, not its Storage, not its auto-generated REST API. Auth is the hand-rolled JWT flow below (SCIC-13 §4 requires exactly that), media stays on Cloudinary, and all data access goes through Prisma. Supabase's own `auth`/`storage` schemas are left untouched; Prisma manages only `public`.
+* **ORM:** Prisma — `prisma/schema.prisma` is the single source of truth for the relational schema (§10), migrated via Prisma Migrate and inspectable via Prisma Studio.
+  * *Two connection URLs (required with Supabase):* `DATABASE_URL` points at the Supavisor **pooler** for application queries; `DIRECT_URL` points at a **session-mode or direct** connection for migrations and Studio, which cannot run through a transaction-mode pooler. Both are declared in the `datasource` block (§10).
+  * *IPv6 caveat:* Supabase direct connections are IPv6-only unless the IPv4 add-on is enabled. If the Express host (Render/Railway) has IPv4-only egress, use the session-mode pooler for `DIRECT_URL`. Confirm the exact connection strings in the Supabase dashboard — the formats have changed between Supabase releases, so don't hand-assemble them from memory.
+  * *Shadow database:* `prisma migrate dev` needs to create a temporary shadow DB, which hosted Supabase may not grant permission for. Author migrations against a local Postgres and ship them with `prisma migrate deploy` against Supabase (see §13).
+* **Authentication:** Hand-rolled JWT auth — `bcrypt` for password hashing, `jsonwebtoken` for signing/verifying access and refresh tokens. No third-party auth library (BetterAuth is dropped). Full flow and the session-revocation tradeoff this implies are detailed in Epic 1 and §5.
+* **Payments:** SSLCommerz as the payment aggregator (cards, bKash, Nagad, Rocket, Upay, internet banking), with server-validated IPN and refund API, called from the Express backend.
+* **Media Signing:** Cloudinary signed-upload endpoint, called from the backend so the API secret never reaches the client.
+* **Hosting & Deployment:** Render or Railway for the Express service (either gives a stable "Live Backend API URL" per §17 of SCIC-13); PostgreSQL on Supabase.
+* **Version Control & CI/CD:** Separate GitHub repo (`turfifa.com-behind_the_scene`), with deploys triggered on `main` merges.
+* **Package & Dependency Management:** pnpm in both repos; dependencies pinned via lockfile for reproducible builds.
+
+---
+
+## 2. Project Overview & Objectives
+
+The **Tactical Analytics & Turf Booking Platform (Turfifa)** is a production-ready, full-stack web application built with TypeScript, React/Next.js, and MongoDB. It serves amateur football, futsal, and 6v6 turf enthusiasts with a dual purpose: bridging the gap between local sports venues and players looking to book slots, while integrating robust RPG-style match analytics, contract-based matchmaking, and automated venue-management utilities.
+
+### Primary Objectives
+
+* **Role-Based Execution:** Implement strict Role-Based Access Control (RBAC) across three dedicated user classes: Players (Buyers), Turf Managers (Sellers), and System Administrators.
+* **Streamline Discovery & Booking:** Enable users to search, filter, and book local turf fields by surface type, location, price, availability, and automated time-of-day classification.
+* **Fair Matchmaking:** Safeguard player/scouter reliability with short-notice contract-drop penalties and direct Admin dispatch alerts.
+* **Dynamic Inventory Yield:** Empower turf managers to mass-generate time slots automatically, edit rows live via inline editable inputs, classify sessions by time type, and apply promotional strikethrough pricing.
+* **Data-Driven Dashboards:** Integrate interactive Recharts visualizations to monitor booking habits, seasonal spending, revenue curves, and match performance metrics.
+* **Type Safety Throughout:** Maintain complete semantic type safety with TypeScript from frontend to backend database interaction.
+
+---
+
+## 3. Target Audience & Core Personas
+
+* **The Buyer (Player / Scouter):** Looks for turf slots to book, sets their operational status, hosts games ("Scouters"), joins open teams, and rates other players based on concrete performance metrics.
+* **The Seller (Turf Manager):** Manages field profiles, automates pricing schedules, and monitors business growth using multi-variable analytics graphs.
+* **The System Admin:** Oversees platform metrics, resolves short-notice structural drop-outs, and handles structural profile flags or account blocks.
+
+---
+
+## 4. Epic & Feature Specifications
+
+### Epic 1: Identity, Registration & Custom Onboarding
+
+* **Role-Based Registration Form:** Built natively using `shadcn/ui` Form fields, custom Checkboxes, and Radio Groups backed by explicit type validation.
+  * *Local Payment Gateway Vectors:* Grouped multi-select options for `bKash`, `Nagad`, `Upay`, and `Others`. Checking `Others` dynamically reveals a sleek textual string field input wrapper. Note: actual payment routing is handled inside SSLCommerz's hosted checkout, so this field is stored as a **preferred method** (used for display/UX hints), not as a payment router.
+  * *Player Base-Position Array:* Select exactly 1 to 3 positions out of standard football tags (e.g., ST, CAM, CB, GK). The primary pick stands as the preferred position tag.
+
+* **Demo Access Utility:** Single-click "Demo Player Login", "Demo Manager Login", and "Demo Admin Login" buttons that auto-fill verified credentials to allow rapid evaluation of every role class.
+
+* **Auth State Context:** A unified React Context providing authentication and role state universally — used to toggle navbar links and protect operational API routes.
+
+* **Locked Parameter Performance Rating System:**
+  * Players define static baseline parameters upon registration across 6 essential attributes: Attack (ATT), Passing (PAS), Strength/Stamina (STA), Speed (SPE), Technical ability / Dribbling (TEC), and Defense (DEF).
+  * *The Gatekeeper Range Rule:* Selectable bounds are strictly capped between **40 and 95**. Values can scale up to **100** only when an attribute accumulates **10** separate, unique user verification endorsements from matches.
+  * *Modification Prevention:* Once committed, the fields freeze. Users attempting to submit a field late get an explicit warning prompt directing them to file an Admin adjustment dispute request form.
+
+* **Registration & Login (JWT):** `POST /api/auth/register` hashes the password with `bcrypt` (cost factor 12) and creates a `User` row (`isDeleted: false`, `emailVerified: false`). `POST /api/auth/login` verifies the hash and issues a token pair: a short-lived **access token** (15 min, returned in the response body and held client-side in memory/`localStorage`) and a longer-lived **refresh token** (7 days, set as an `httpOnly` cookie). `POST /api/auth/refresh` exchanges a valid refresh token for a new access token; `POST /api/auth/logout` clears the refresh cookie.
+* **Email Verification & Password Reset (custom, no third-party auth library):** Registration generates a random token, stores it on an `EmailVerificationToken` row (§10) with a short expiry, and emails a verification link via a transactional email provider (e.g. Resend or Nodemailer+SMTP) called from the Express backend. Unverified accounts can browse `/explore` but cannot book, host, or apply to matches — enforced by an `emailVerified` check in the relevant route middleware. Password reset follows the same pattern via a `PasswordResetToken` row: request issues a time-boxed token and email link, the reset endpoint validates the token, re-hashes the new password with bcrypt, and invalidates the token row.
+
+### Epic 2: Contractual Matchmaking & The Scouting Engine
+
+* **Tri-State Status Lifecycle:** Players dynamically switch status profiles between Idle ⚪, Organizing 🔵, or Interested to Play 🟢. Status flips automatically to Idle when active windows expire.
+* **The Difficulty Sorting Ladder:** Users can search for Organizing players (🔵) filtered cleanly against a calculated Overall Rating difficulty tier classification index:
+  * *Legend:* 90 – 95
+  * *Elite:* 85 – 89
+  * *Pro:* 80 – 84
+  * *Semi-Pro:* 75 – 79
+  * *Home Buddies:* 70 – 74
+  * *Playing for Fun:* below 70
+
+* **Contract Cooldowns & Short-Notice Penalty Descents:**
+  * Once a player and an organizing scouter agree to a slot, they enter a locked contract.
+  * If a party cancels, a **6-hour global application cooldown lock** enforces onto the canceling user account instantly.
+  * *Late Pull-Out Trigger:* If a drop occurs within **2 hours** of kickoff, an immediate automated ticket is dispatched to the `admin_alerts` stream database collection (schema in §10), flagging the user for fast administrative manual review.
+
+* **Team / Squad Formation:** An Organizing player (🔵) hosts a match and owns a `TeamModel` (see §10) capped at a format-derived roster size (e.g., 12 for 6v6 including subs). Players discover open teams via the Difficulty Sorting Ladder and send a join request (*Requested*); the captain accepts or declines from the **Offers & Requests Matrix**. Accepted members appear in the team's confirmed roster, which feeds the navbar Match hub's teammate list (§9) and the Gameweeks Ledger's endorsement flow (§5). A captain can also directly *Offer* a slot to a specific player, bypassing the open-request queue.
+
+### Epic 3: High-Yield Slot Engine & Booking Workflows
+
+* **Venue Profile Creation:** Restricted form allowing an authenticated Turf Manager to append a field profile. Captures title, short and full descriptions, location, surface type, supported formats, amenities, and remote image asset references. This profile seeds the slot engine below. Strict rule: no `Lorem Ipsum` — all entries use realistic addresses, prices, and descriptions.
+
+* **Automated Serial Grid Drop:** Turf managers configure field profiles by specifying opening time, closing time, and slot duration parameters. Clicking confirm automatically calculates chunks using a sequential timing algorithm:
+
+$$\text{Total Slots} = \frac{\text{Closing Time} - \text{Opening Time}}{\text{Slot Duration}}$$
+
+* **Automated Time-Type Classification:** As slots are serially sliced, the system automatically tags each slot with a `timeType` metadata attribute derived strictly from the slot's starting time:
+  * *Morning:* Start time up until 11:59 AM.
+  * *Afternoon:* 12:00 PM up until 4:59 PM.
+  * *Evening:* 5:00 PM up until 7:59 PM.
+  * *Night:* 8:00 PM onward.
+
+* **Inline Editable Matrix Cells:** Generated slots map inside inline editable text input boxes accessible strictly to the respective Turf Manager and System Admins to easily overwrite individual pricing or block times.
+* **Promotional Strikethrough Display Engine:** Supports markdown price manipulation. If a promo price field is populated, the default UI renders the base pricing wrapped in a muted strikethrough `<span className="line-through text-muted-foreground">` block alongside the active `text-primary` discount value (token-driven, so it holds in dark mode).
+* **Booking Integrity:** A slot can be sold exactly once, and payment/refund rules gate every state change. The concurrency, hold-window, and payment mechanics are specified in §6 (Payments, Refunds & Booking Integrity).
+
+---
+
+## 5. Route-by-Route Blueprint & Dashboards
+
+### Landing Page Router Paths
+
+* **Public (Logged Out):** `/` (Home), `/explore` (Explore Turfs), `/about` (About Us), `/contact` (Contact & Support).
+* **Private (Logged In Adds):** `/dashboard` (My Dashboard), `/dashboard/bookings` (Bookings Console), `/manager/turfs/add` (Add a Turf — managers), `/manager/turfs/manage` (Manage Inventories — managers), `/profile` (Profile / Tactics).
+
+### Public Layer
+
+* **`/` (Home Landing Page):** Hosts the 7 mandatory sections defined below.
+* **`/about` (About Us):** Platform mission, how the marketplace works, and the team/story behind Turfifa. Zero placeholder copy.
+* **`/contact` (Contact & Support):** Contact form (name, email, message) plus static contact details (support email, phone, city) and social links — mirrors and can share content with the footer's contact block. Satisfies the assignment's "at least 2 additional pages" requirement alongside `/about`.
+* **`/explore` (Core Finder Engine):**
+  * *Search Bar:* Reactive query tracking that scans turf titles, descriptions, and locations.
+  * *Advanced Filtering (minimum two simultaneous fields):* Surface Type (Indoor, Artificial Turf, Natural Grass), Price Range (sliding scale or brackets), Rating/Availability, and the automated `timeType` slots (Morning, Afternoon, Evening, Night).
+  * *Sorting & Pagination:* Sort by price (low → high), rating (high → low), or latest added, with clean cursor-based or offset pagination controls.
+  * *Responsive Grid:* 4-wide column cards on desktop, 2 on tablet, 1 on mobile.
+  * *Skeleton Loader:* A perfectly dimensioned grid of shimmer-cards mirroring the active listing layout to eliminate layout shift during data loading.
+* **`/explore/:id` (Details Page):**
+  * *Media Reel:* High-definition carousel/gallery showcasing pristine photos of the selected venue.
+  * *Overview Segment:* Long-form description defining venue rules, amenities (showers, locker rooms, bibs provided), and physical location mapping.
+  * *Key Specifications Box:* Structured grid declaring field dimensions, optimal player count (6v6, 5v5), lighting quality ratings, and exact pricing structures.
+  * *Analytical Review Aggregator:* Recharts representation mapping rating counts alongside individual historical user reviews.
+
+### 7 Mandatory Landing Page Sections
+
+1. **Hero Display:** Compact, highly stylized grid (60–70vh maximum) showing a strong headline, booking CTA, and an interactive 6v6 tactical miniature layout preview / animation.
+2. **Live Usage Metrics:** Real-time data counters reflecting active bookings, registered amateur teams, and vetted pitch venues.
+3. **Featured Turfs Carousel/Grid:** Highlighting top-rated pitches with quick-view indicators.
+4. **Operational Instructions ("How It Works"):** Step-by-step track outlining: Search → Select Formation → Reserve Slot.
+5. **Tactical Module Preview:** Highlighting the built-in 6v6 pitch planner available to registered team captains.
+6. **Verified User Testimonials:** Statements from local league captains emphasizing ease of scheduling.
+7. **Newsletter Subscription & FAQ Block:** Clean input capture alongside a responsive Shadcn Accordion displaying typical platform rules.
+
+### Global Footer
+
+Present on every route (public and private). Must ship with fully working links — no `#` placeholders:
+
+* **Site Map Links:** Home, Explore, About, Contact, plus role-relevant dashboard links when logged in.
+* **Contact Block:** Support email, phone number, and city/address — same source of truth as `/contact`.
+* **Social Links:** Real or realistic outbound links (e.g., Facebook, Instagram, X) opening in a new tab.
+* **Legal:** Links to Privacy Policy / Terms (can be lightweight static content, but must not 404).
+
+### Error, Empty & Abuse-Prevention States
+
+* **404 / Not Found:** Custom `not-found.tsx` styled with the shared token theme (not a stock Next.js page), with a CTA back to `/` and `/explore`.
+* **500 / Runtime Error:** Route-level `error.tsx` boundaries on `/explore`, `/explore/:id`, and all dashboard routes, offering a retry action instead of a blank crash screen.
+* **Empty States:** Every list surface that can legitimately be empty (Explore results after filtering, My Bookings, Manage Inventories, Offers & Requests Matrix, Gameweeks Ledger, Admin queues) ships a designed empty state — icon/illustration plus one line of real copy and a relevant CTA. Counts as content, so it must not be a bare "No data" string (violates the "no placeholder content" rule).
+* **Rate Limiting:** Public unauthenticated write endpoints — `/contact` submission and the newsletter signup — are rate-limited server-side (e.g., IP-keyed, 5 requests/hour) to match the hardening already applied to auth and payment IPN routes. Authenticated write routes (booking, join requests, reviews) are rate-limited per-user to blunt scripted abuse.
+
+### Protected Player Dashboard Structure (3 Sub-Routes)
+
+1. **My Bookings:** Historical timeline stack tracing the user's latest 20 confirmed reservations.
+2. **Offers & Requests Matrix:**
+   * *Join Sub-Filter:* Tracks user requests sent to Scouters (*Requested*) and incoming team invites received (*Offer*).
+   * *Scout Sub-Filter:* Displays offers extended to target players (*Offered*) and queues of applicants seeking entry into their hosted matches (*Interested*).
+3. **Gameweeks Ledger:** Preserves up to 10 historical match logs rendered using muted, low-opacity text styling wrappers. Organizing captains can edit results (scoreboards, list goals/assists, name star players) and allow selected squad members to endorse performance metrics.
+
+### Protected Turf Manager Dashboard
+
+* **Business Analytics Grid:** Houses a rolling **Yearly High-Low Line/Area Chart** plotting peak revenue potential paths alongside off-peak promotional price floors to analyze business growth curves over a 12-month calendar scale.
+* **Incoming Requests Queue:** Interface sorting incoming user forms with dedicated modals summarizing player location details, comments, and payment status checks.
+* **Booking Confirmed Table:** A live tracking operational map allowing direct modification or cancellation up until 1 hour before slot match kickoffs. **Cancellation is refund-gated:** a manager cannot cancel a *paid* booking until a successful SSLCommerz refund clears (see §6). Until then the slot stays locked and cannot be resold.
+
+### Protected Admin Operations Dashboard
+
+* **Global Auditing Feed:** Oversees global profiles with immediate commands to freeze, limit, or remove toxic users or fraudulent venues. Since auth is stateless JWT (not server-side sessions), revocation works differently than a session store:
+  * The `requireAuth` Express middleware verifies the JWT signature/expiry **and** loads the user's current `accountStatus` from Postgres on every request to a protected route. A `frozen`/`banned` status is rejected with `403` immediately — so moderation takes effect on the offender's very next API call, not "whenever the token expires."
+  * The access token's short 15-minute lifetime bounds how long a *freshly-issued* token could theoretically be used before the next accountStatus check fires on a protected call; refresh tokens are additionally checked against `accountStatus` in `POST /api/auth/refresh`, so a frozen/banned user cannot mint new access tokens at all.
+* **Dispute Center Desk:** Real-time monitoring panel housing short-notice cancellation alerts and base-parameter modification adjustment request streams. Both feeds read from the typed `AdminAlertModel` collection (§10) — the `admin_alerts` name used elsewhere in this doc refers to the same collection.
+
+### Notifications
+
+* **In-App Only (MVP scope):** The `[Match 🔔]` navbar badge (§9) and dashboard toast/banner surfaces are the only notification channels for this project — no email or push notifications are required to satisfy the assignment. Notification records are typed as `NotificationModel` (§10) and are created server-side whenever a contract is confirmed, cancelled, refunded, or an endorsement request is made.
+
+---
+
+## 6. Payments, Refunds & Booking Integrity
+
+### Payment Flow (SSLCommerz)
+
+1. **Initiate:** On booking checkout, the server creates a `pending` transaction and calls the SSLCommerz **initiate** endpoint, receiving a `GatewayPageURL`. The player is redirected to the SSLCommerz hosted page (cards, bKash, Nagad, Rocket, Upay, internet banking).
+2. **Validate server-side:** The redirect success/fail/cancel URLs are **never trusted on their own.** Confirmation happens only when SSLCommerz's **IPN** hits the server and the transaction is re-validated via the validation API (`val_id`). Only a validated `VALID`/`VALIDATED` status flips the booking to `paid` and confirms the contract.
+3. **Persist:** The gateway `tran_id` and `bank_tran_id` are stored on the `BookingContract` for later refund calls.
+
+### Anti–Double-Sell (Slot Integrity)
+
+A slot must never be sold twice. Three layers enforce this — a boolean flag alone is insufficient:
+
+* **Atomic claim:** Booking creation runs inside a single Prisma `$transaction`: it conditionally updates `SlotConfiguration.lifecycle` from `available` to `held` (`UPDATE ... WHERE id = $1 AND lifecycle = 'available'`) and only creates the `BookingContract` row if that update affected exactly one row. The loser of a race gets zero affected rows and is rejected — there is no read-then-write gap.
+* **Database guarantee:** A Postgres partial unique index on `booking_contracts (slot_id)` where `status IN ('held', 'confirmed')` (declared via a raw SQL migration alongside the Prisma-managed schema, since Prisma's schema DSL doesn't yet express partial indexes natively) makes a second active booking on one slot impossible even under a logic bug.
+* **Payment hold window:** On checkout, the slot moves to a temporary `held` state (default 10 min) tied to the pending transaction. If IPN validation doesn't arrive in the window, the hold auto-expires and the slot returns to available — preventing both double-sell and slots stranded by abandoned checkouts.
+
+### Refund Policy (proposed defaults — tunable)
+
+Mirrors the existing 2-hour late-pull-out threshold so cancellation rules stay consistent across the platform:
+
+* **Player cancels ≥ 2h before kickoff:** Full refund, minus the non-refundable SSLCommerz processing fee.
+* **Player cancels < 2h before kickoff (late pull-out):** No refund / forfeit, plus the existing 6-hour cooldown lock and an `admin_alerts` flag. This is what gives the penalty teeth.
+* **Turf Manager cancels (any time):** Always a full refund to the player (manager is at fault), and the refund must clear before the cancellation completes.
+* **Platform / venue fault (e.g., closure, maintenance):** Full refund including the processing fee, absorbed by the platform.
+
+### Refund-Gated Cancellation (State Machine)
+
+A manager cannot free or resell a paid slot until the player is made whole:
+
+* Manager requests cancel on a `confirmed` + `paid` booking → booking enters `refund_pending`; the SSLCommerz refund API is called with the stored `bank_tran_id`.
+* **Refund succeeds** → booking → `cancelled`, slot released (`bookingOccupied → false`), player notified.
+* **Refund fails** → cancellation is **blocked**; booking stays `refund_pending`, slot stays locked, and the case is pushed to the Admin **Dispute Center Desk**.
+* **Guard:** The cancel Route Handler rejects any manager cancel where `paymentStatus === 'paid' && refundStatus !== 'succeeded'`.
+
+---
+
+## 7. Visual Hierarchy & System Design Rules
+
+### Project & Design-System Setup
+
+* **Package Manager:** pnpm.
+* **Shadcn/UI Initialization:** the project and theme are scaffolded via the shared preset:
+
+```bash
+pnpm dlx shadcn@latest init --preset b4ZBIWFrk0 --base radix --template next --pointer
+pnpm dlx shadcn@latest add --all --overwrite
+```
+
+* This installs the Next.js template on the `radix-nova` style (`baseColor: mist`, built on the consolidated `radix-ui` + `@base-ui/react` packages rather than individual `@radix-ui/react-*` packages) and writes the token theme below into `app/globals.css` via a `@theme inline` block that imports `shadcn/tailwind.css`. **Tokens are the single source of truth** — components reference semantic tokens (`bg-primary`, `text-muted-foreground`, `border`, etc.), never hardcoded hex. *(Superseded an earlier draft preset ID, `b4FCPsuZYu` — the token values below are unchanged between the two, only the init command and generated UI primitive layer differ.)*
+
+### Design Tokens (`app/globals.css`)
+
+The palette is OKLCH and theme-aware (light + dark). The primary hue sits in the green band (~128–131°), carrying the synthetic-turf identity from earlier drafts — now expressed as tokens with full dark-mode support, so the old hardcoded emerald/slate hex values are retired in favor of the variables below.
+
+```css
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.148 0.004 228.8);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.148 0.004 228.8);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.148 0.004 228.8);
+  --primary: oklch(0.841 0.238 128.85);
+  --primary-foreground: oklch(0.405 0.101 131.063);
+  --secondary: oklch(0.967 0.001 286.375);
+  --secondary-foreground: oklch(0.21 0.006 285.885);
+  --muted: oklch(0.963 0.002 197.1);
+  --muted-foreground: oklch(0.56 0.021 213.5);
+  --accent: oklch(0.963 0.002 197.1);
+  --accent-foreground: oklch(0.218 0.008 223.9);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.925 0.005 214.3);
+  --input: oklch(0.925 0.005 214.3);
+  --ring: oklch(0.723 0.014 214.4);
+  --chart-1: oklch(0.897 0.196 126.665);
+  --chart-2: oklch(0.768 0.233 130.85);
+  --chart-3: oklch(0.648 0.2 131.684);
+  --chart-4: oklch(0.532 0.157 131.589);
+  --chart-5: oklch(0.453 0.124 130.933);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.987 0.002 197.1);
+  --sidebar-foreground: oklch(0.148 0.004 228.8);
+  --sidebar-primary: oklch(0.648 0.2 131.684);
+  --sidebar-primary-foreground: oklch(0.986 0.031 120.757);
+  --sidebar-accent: oklch(0.963 0.002 197.1);
+  --sidebar-accent-foreground: oklch(0.218 0.008 223.9);
+  --sidebar-border: oklch(0.925 0.005 214.3);
+  --sidebar-ring: oklch(0.723 0.014 214.4);
+}
+
+.dark {
+  --background: oklch(0.148 0.004 228.8);
+  --foreground: oklch(0.987 0.002 197.1);
+  --card: oklch(0.218 0.008 223.9);
+  --card-foreground: oklch(0.987 0.002 197.1);
+  --popover: oklch(0.218 0.008 223.9);
+  --popover-foreground: oklch(0.987 0.002 197.1);
+  --primary: oklch(0.768 0.233 130.85);
+  --primary-foreground: oklch(0.405 0.101 131.063);
+  --secondary: oklch(0.274 0.006 286.033);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.275 0.011 216.9);
+  --muted-foreground: oklch(0.723 0.014 214.4);
+  --accent: oklch(0.275 0.011 216.9);
+  --accent-foreground: oklch(0.987 0.002 197.1);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.56 0.021 213.5);
+  --chart-1: oklch(0.897 0.196 126.665);
+  --chart-2: oklch(0.768 0.233 130.85);
+  --chart-3: oklch(0.648 0.2 131.684);
+  --chart-4: oklch(0.532 0.157 131.589);
+  --chart-5: oklch(0.453 0.124 130.933);
+  --sidebar: oklch(0.218 0.008 223.9);
+  --sidebar-foreground: oklch(0.987 0.002 197.1);
+  --sidebar-primary: oklch(0.768 0.233 130.85);
+  --sidebar-primary-foreground: oklch(0.274 0.072 132.109);
+  --sidebar-accent: oklch(0.275 0.011 216.9);
+  --sidebar-accent-foreground: oklch(0.987 0.002 197.1);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.56 0.021 213.5);
+}
+```
+
+**Token intent map** (how the palette binds to features):
+
+* `--primary` (turf green): CTAs, active/confirmed states, and the live discount price.
+* `--background` / `--card` / `--border`: structural surfaces — replaces the retired slate-dark backgrounds.
+* `--muted-foreground`: the struck-through *original* price — replaces the previously hardcoded `text-slate-400` so it holds up in dark mode.
+* `--destructive`: cancellations, short-notice penalties, and block/freeze/ban actions.
+* `--chart-1 … --chart-5` (green ramp): Recharts series palette (see §8).
+* `--sidebar-*`: the dashboard shell for the player / manager / admin navigation.
+
+### Layout Uniformity
+
+* **Card Constraints:** Absolute size consistency across all explore cards; corner radius driven by the token `--radius` — set to `0.45rem` by the `radix-nova` preset actually installed (supersedes earlier drafts' `0.625rem`/8px notes). The preset also derives `--radius-sm` through `--radius-4xl` as multiples of `--radius` for consistent scaling across component sizes. Smooth hover transformations.
+* **Grid Framework:** Standard 4-column layout on wide screens (`lg:grid-cols-4`), adapting to 2 columns on tablets and 1 column on mobile.
+* **Zero Placeholders:** Strict rule prohibiting `Lorem Ipsum` filler text. All entities must use realistic addresses, prices, descriptions, and structural summaries.
+
+---
+
+## 8. Data Analytics & Recharts Mapping
+
+All Recharts series draw their colors from the `--chart-1 … --chart-5` tokens defined in §7, so charts stay on-brand and theme-aware in both light and dark mode. Each Recharts family maps to a concrete surface:
+
+* **Player Attribute Radar (Radar Chart):** Rendered in the profile header, tracking the 6 attributes (ATT, PAS, STA, SPE, TEC, DEF).
+* **Venue Performance (Bar Chart):** Displays peak booking times across hourly bands throughout the day, helping players find quiet slots and operators optimize pricing.
+* **Revenue / Financial Tracking (Area/Line Chart):** The manager's Yearly High-Low chart maps peak revenue potential against off-peak promotional floors over a rolling 12-month period; a player-side variant maps monthly team expenditure.
+* **Review Rating Distribution (Bar / Aggregator):** On `/explore/:id`, maps rating counts alongside individual historical user reviews.
+* **Tactical / Formation Distribution (Pie/Radar Chart):** Illustrates team tactical stats or formation types chosen during games organized via the platform.
+
+---
+
+## 9. Component-Driven User Interfaces
+
+### Player Profile Architecture Header Layout
+
+```text
++-------------------------------------------------------------------------+
+| [ PROFILE IMAGE ]                                     [ RECHARTS RADAR ]|
+| Full Name Text Layout                                 [  CHART DISPLAY ]|
+| Height / Weight Metric Strings                        Tracks ATT, PAS,  |
+| Stars Counter / Matches Played / Goals / Assists      STA, SPE, TEC, DEF|
+| Contact Number Reference Input Line                                     |
+|                                                                         |
+| -> Primary Position Text Banner (Large Bold Font Size) | Overall Rating |
+| -> Secondary Backup Roles (Muted Miniature Text Variants)               |
++-------------------------------------------------------------------------+
+```
+
+### Global Match Button Utility
+
+When a contractual agreement updates successfully, a dynamic `[Match 🔔]` status badge renders directly inside the global navigation navbar interface. Clicking this route targets a dedicated real-time hub tracking matching venue addresses, accurate time slot indicators, confirmed teammate lists (highlighting the user's item name in active emerald colors), and an animated live countdown clock pointing directly to game kickoff.
+
+---
+
+## 10. Unified Database Schema Architecture (Prisma / PostgreSQL)
+
+Lives in `turfifa.com-behind_the_scene/prisma/schema.prisma`. Fully normalized — Mongo-style embedded arrays and loose string FKs are replaced with real foreign keys, join tables, and Postgres enums. Soft delete (`isDeleted` + `deletedAt`) and `createdAt`/`updatedAt` timestamps are applied to every primary entity; pure join/audit rows (memberships, endorsements, tokens) are hard-deleted by design since they don't represent user-facing records on their own — deleting the parent (via soft delete) is what matters there.
+
+```prisma
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // Supabase Supavisor pooler — application queries
+  directUrl = env("DIRECT_URL")   // session-mode/direct — migrations + Prisma Studio (§1)
+}
+
+// ── Enums ───────────────────────────────────────────────────────────────
+
+enum UserRole {
+  PLAYER
+  TURF_MANAGER
+  ADMIN
+}
+
+enum AccountStatus {
+  ACTIVE
+  LIMITED
+  FROZEN
+  BANNED
+}
+
+enum MatchStatusState {
+  IDLE
+  ORGANIZING
+  INTERESTED
+}
+
+enum AttributeCode {
+  ATT
+  PAS
+  STA
+  SPE
+  TEC
+  DEF
+}
+
+enum SurfaceType {
+  INDOOR
+  ARTIFICIAL_TURF
+  NATURAL_GRASS
+}
+
+enum PlayerFormat {
+  FORMAT_5V5
+  FORMAT_6V6
+  FORMAT_7V7
+}
+
+enum SlotTimeType {
+  MORNING
+  AFTERNOON
+  EVENING
+  NIGHT
+}
+
+enum SlotLifecycle {
+  AVAILABLE
+  HELD
+  BOOKED
+}
+
+enum BookingStatus {
+  HELD
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PENDING
+  PAID
+  REFUND_PENDING
+  REFUNDED
+}
+
+enum RefundStatus {
+  NONE
+  REQUESTED
+  SUCCEEDED
+  FAILED
+}
+
+enum ReviewTargetType {
+  VENUE
+  PLAYER
+}
+
+enum TeamMemberRole {
+  CAPTAIN
+  MEMBER
+}
+
+enum RequestDirection {
+  REQUESTED
+  OFFERED
+}
+
+enum RequestStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+enum AdminAlertType {
+  LATE_PULL_OUT
+  ATTRIBUTE_DISPUTE
+  USER_REPORT
+  REFUND_FAILURE
+}
+
+enum AdminAlertStatus {
+  OPEN
+  REVIEWING
+  RESOLVED
+}
+
+enum NotificationType {
+  BOOKING_CONFIRMED
+  BOOKING_CANCELLED
+  REFUND_UPDATE
+  MATCH_INVITE
+  ENDORSEMENT_REQUEST
+}
+
+// ── Core identity ───────────────────────────────────────────────────────
+
+model User {
+  id                String        @id @default(uuid())
+  email             String        @unique
+  passwordHash      String
+  fullName          String
+  role              UserRole
+  accountStatus     AccountStatus @default(ACTIVE)
+  emailVerified     Boolean       @default(false)
+  phoneOptional     String?
+  avatarUrl         String?
+  gateways          String[]      @default([]) // preferred payment method tags: bKash, Nagad, Upay, Others
+  customGatewayText String?
+  isDeleted         Boolean       @default(false)
+  deletedAt         DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  playerProfile        PlayerProfile?
+  managedVenues         FieldVenue[]            @relation("VenueManager")
+  hostedTeams            Team[]                  @relation("TeamCaptain")
+  teamMemberships        TeamMembership[]
+  teamJoinRequests        TeamJoinRequest[]
+  scoutedContracts        BookingContract[]       @relation("ContractScouter")
+  playedContracts         BookingContract[]       @relation("ContractPlayer")
+  attributeEndorsements   AttributeEndorsement[]
+  authoredReviews          Review[]                @relation("ReviewAuthor")
+  targetedReviews         Review[]                @relation("ReviewTargetPlayer")
+  notifications            Notification[]
+  adminAlertsRaised       AdminAlert[]            @relation("AlertSubject")
+  adminAlertsResolved     AdminAlert[]            @relation("AlertResolver")
+  emailVerificationTokens EmailVerificationToken[]
+  passwordResetTokens      PasswordResetToken[]
+
+  @@index([role])
+  @@map("users")
+}
+
+model PlayerProfile {
+  id                     String            @id @default(uuid())
+  userId                 String            @unique
+  user                   User              @relation(fields: [userId], references: [id])
+  positions              String[]          // 1–3 values, e.g. ["ST", "CAM"]
+  currentStatus          MatchStatusState  @default(IDLE)
+  cooldownExpiryTimestamp DateTime?
+  accumulatedStars        Int               @default(0)
+  overallRating           Int               @default(0) // derived, recalculated on attribute change
+  isDeleted               Boolean           @default(false)
+  deletedAt                DateTime?
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+
+  attributes PlayerAttribute[]
+
+  @@map("player_profiles")
+}
+
+model PlayerAttribute {
+  id              String        @id @default(uuid())
+  playerProfileId String
+  playerProfile   PlayerProfile @relation(fields: [playerProfileId], references: [id])
+  code            AttributeCode
+  value           Int           // 40–95 baseline; scales to 100 once endorsement count >= 10
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  endorsements AttributeEndorsement[]
+
+  @@unique([playerProfileId, code])
+  @@map("player_attributes")
+}
+
+model AttributeEndorsement {
+  id                String          @id @default(uuid())
+  playerAttributeId String
+  playerAttribute   PlayerAttribute @relation(fields: [playerAttributeId], references: [id])
+  endorserId        String
+  endorser          User            @relation(fields: [endorserId], references: [id])
+  createdAt         DateTime        @default(now())
+
+  @@unique([playerAttributeId, endorserId]) // one endorsement per verifier per attribute
+  @@map("attribute_endorsements")
+}
+
+// ── Venues & slots ──────────────────────────────────────────────────────
+
+model FieldVenue {
+  id                  String        @id @default(uuid())
+  managerId           String
+  manager             User          @relation("VenueManager", fields: [managerId], references: [id])
+  title               String
+  shortDescription    String
+  fullDescription     String
+  location            String
+  surfaceType         SurfaceType
+  supportedFormats    PlayerFormat[]
+  amenities           String[]      @default([])
+  imageUrls           String[]      @default([])
+  rating               Float         @default(0)
+  openingTime          String        // "HH:MM"
+  closingTime          String        // "HH:MM"
+  slotDurationMinutes Int
+  isDeleted            Boolean       @default(false)
+  deletedAt             DateTime?
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+
+  slots SlotConfiguration[]
+  teams Team[]
+  reviews Review[] @relation("ReviewTargetVenue")
+
+  @@index([managerId])
+  @@map("field_venues")
+}
+
+model SlotConfiguration {
+  id                     String         @id @default(uuid())
+  fieldId                String
+  field                  FieldVenue     @relation(fields: [fieldId], references: [id])
+  startTimeWindow        String         // "HH:MM"
+  endTimeWindow          String         // "HH:MM"
+  timeType               SlotTimeType
+  baseStandardPrice      Int            // integer BDT
+  promotionalOfferPrice  Int?
+  lifecycle              SlotLifecycle  @default(AVAILABLE)
+  holdExpiresAt          DateTime?
+  isDeleted              Boolean        @default(false)
+  deletedAt              DateTime?
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
+
+  bookingContracts BookingContract[]
+  teams            Team[]
+
+  @@index([fieldId])
+  @@map("slot_configurations")
+}
+
+// ── Booking & payments ──────────────────────────────────────────────────
+
+model BookingContract {
+  id                String        @id @default(uuid())
+  slotId            String
+  slot              SlotConfiguration @relation(fields: [slotId], references: [id])
+  scouterId         String
+  scouter           User          @relation("ContractScouter", fields: [scouterId], references: [id])
+  playerId          String
+  player            User          @relation("ContractPlayer", fields: [playerId], references: [id])
+  status            BookingStatus @default(HELD)
+  agreedAt          DateTime      @default(now())
+  kickoffTimestamp  DateTime
+  cancelledById     String?
+  flaggedToAdmin    Boolean       @default(false)
+
+  amount            Int           // integer BDT
+  currency          String        @default("BDT")
+  paymentStatus     PaymentStatus @default(UNPAID)
+  sslTranId         String?
+  sslBankTranId     String?
+  refundStatus      RefundStatus  @default(NONE)
+  refundedAt        DateTime?
+
+  isDeleted         Boolean       @default(false)
+  deletedAt         DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  reviews  Review[]
+  alerts   AdminAlert[]
+  notifications Notification[]
+
+  @@index([slotId])
+  @@index([status])
+  // Partial unique index over (slotId) WHERE status IN ('HELD','CONFIRMED')
+  // added via a follow-up raw SQL migration — see §6, Anti-Double-Sell.
+  @@map("booking_contracts")
+}
+
+// ── Reviews ─────────────────────────────────────────────────────────────
+
+model Review {
+  id                String           @id @default(uuid())
+  authorId          String
+  author            User             @relation("ReviewAuthor", fields: [authorId], references: [id])
+  targetType        ReviewTargetType
+  targetVenueId     String?
+  targetVenue       FieldVenue?      @relation("ReviewTargetVenue", fields: [targetVenueId], references: [id])
+  targetPlayerId    String?
+  targetPlayer      User?            @relation("ReviewTargetPlayer", fields: [targetPlayerId], references: [id])
+  bookingContractId String?
+  bookingContract   BookingContract? @relation(fields: [bookingContractId], references: [id])
+  rating            Int              // 1–5, validated at the service layer
+  comment           String
+  isDeleted         Boolean          @default(false)
+  deletedAt         DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  // Exactly one of targetVenueId / targetPlayerId is set, matching targetType.
+  // Enforced in the service layer (Postgres CHECK constraints aren't expressed
+  // in the Prisma DSL, so this is validated in services/review/ before insert).
+
+  @@map("reviews")
+}
+
+// ── Teams & matchmaking ─────────────────────────────────────────────────
+
+model Team {
+  id          String       @id @default(uuid())
+  captainId   String
+  captain     User         @relation("TeamCaptain", fields: [captainId], references: [id])
+  fieldId     String
+  field       FieldVenue   @relation(fields: [fieldId], references: [id])
+  slotId      String
+  slot        SlotConfiguration @relation(fields: [slotId], references: [id])
+  format      PlayerFormat
+  rosterLimit Int          // derived from format, e.g. FORMAT_6V6 -> 12
+  isDeleted   Boolean      @default(false)
+  deletedAt   DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  memberships    TeamMembership[]
+  joinRequests   TeamJoinRequest[]
+
+  @@index([captainId])
+  @@map("teams")
+}
+
+model TeamMembership {
+  id       String          @id @default(uuid())
+  teamId   String
+  team     Team            @relation(fields: [teamId], references: [id])
+  playerId String
+  player   User            @relation(fields: [playerId], references: [id])
+  role     TeamMemberRole  @default(MEMBER)
+  joinedAt DateTime        @default(now())
+
+  @@unique([teamId, playerId])
+  @@map("team_memberships")
+}
+
+model TeamJoinRequest {
+  id        String            @id @default(uuid())
+  teamId    String
+  team      Team              @relation(fields: [teamId], references: [id])
+  playerId  String
+  player    User              @relation(fields: [playerId], references: [id])
+  direction RequestDirection  // 'requested' = player -> team, 'offered' = captain -> player
+  status    RequestStatus     @default(PENDING)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@map("team_join_requests")
+}
+
+// ── Admin & notifications ───────────────────────────────────────────────
+
+model AdminAlert {
+  id                String            @id @default(uuid())
+  type              AdminAlertType
+  status            AdminAlertStatus  @default(OPEN)
+  subjectUserId     String
+  subjectUser       User              @relation("AlertSubject", fields: [subjectUserId], references: [id])
+  relatedContractId String?
+  relatedContract   BookingContract?  @relation(fields: [relatedContractId], references: [id])
+  details           String
+  resolvedAt        DateTime?
+  resolvedByAdminId String?
+  resolvedByAdmin   User?             @relation("AlertResolver", fields: [resolvedByAdminId], references: [id])
+  isDeleted         Boolean           @default(false)
+  deletedAt         DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@index([status])
+  @@map("admin_alerts")
+}
+
+model Notification {
+  id                String            @id @default(uuid())
+  userId            String
+  user              User              @relation(fields: [userId], references: [id])
+  type              NotificationType
+  message           String
+  relatedContractId String?
+  relatedContract   BookingContract?  @relation(fields: [relatedContractId], references: [id])
+  read              Boolean           @default(false)
+  isDeleted         Boolean           @default(false)
+  deletedAt         DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@index([userId, read])
+  @@map("notifications")
+}
+
+// ── Auth support tables (custom JWT flow — no third-party auth library) ──
+
+model EmailVerificationToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@map("email_verification_tokens")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@map("password_reset_tokens")
+}
+```
+
+**Notes carried over from the pre-Prisma draft:**
+
+* **Currency:** all `amount`/price fields are integer BDT (Bangladeshi Taka), no minor-unit subdivision — SSLCommerz's local rails settle in whole Taka. `currency` is kept as a column for forward-compatibility but is not user-selectable in this project.
+* **Timezone:** every stored timestamp is UTC (Postgres `timestamptz` under Prisma's `DateTime`). All `"HH:MM"` fields (opening/closing/slot windows) are interpreted in Asia/Dhaka (UTC+6) at render and cutoff-calculation time; the 2-hour late-pull-out and 10-minute hold-window checks always compare against server UTC `now()` converted through that fixed offset, never the client's local time.
+
+```typescript
+// turfifa.com/lib/api-types.ts
+//
+// These are NOT database types — the frontend never touches Postgres or
+// Prisma directly. They are the JSON contract returned by the Express API
+// (§11) and are what `lib/api-client.ts` uses to type every `fetch` call.
+// Field names track the Prisma models in §10 (camelCase, `id` as the PK on
+// every resource), reshaped where a relation is serialized into the response
+// body — e.g. `attributes` comes back as an array, not an embedded object.
+
+export type UserRole = 'player' | 'turf_manager' | 'admin';
+export type MatchStatusState = 'idle' | 'organizing' | 'interested';
+export type AttributeCode = 'ATT' | 'PAS' | 'STA' | 'SPE' | 'TEC' | 'DEF';
+export type SlotTimeType = 'morning' | 'afternoon' | 'evening' | 'night';
+export type SurfaceType = 'Indoor' | 'Artificial Turf' | 'Natural Grass';
+export type PlayerFormat = '5v5' | '6v6' | '7v7';
+export type AccountStatus = 'active' | 'limited' | 'frozen' | 'banned';
+export type SlotLifecycle = 'available' | 'held' | 'booked';
+export type BookingStatus = 'held' | 'pending' | 'confirmed' | 'cancelled' | 'completed';
+export type PaymentStatus = 'unpaid' | 'pending' | 'paid' | 'refund_pending' | 'refunded';
+export type RefundStatus = 'none' | 'requested' | 'succeeded' | 'failed';
+export type RequestDirection = 'requested' | 'offered'; // 'requested' = player -> team, 'offered' = captain -> player
+export type RequestStatus = 'pending' | 'accepted' | 'declined';
+export type AdminAlertType = 'late_pull_out' | 'attribute_dispute' | 'user_report' | 'refund_failure';
+export type AdminAlertStatus = 'open' | 'reviewing' | 'resolved';
+export type NotificationType = 'booking_confirmed' | 'booking_cancelled' | 'refund_update' | 'match_invite' | 'endorsement_request';
+
+// NOTE: Auth is hand-rolled JWT (§1, §11) — no third-party auth library.
+// `accountStatus` below is the moderation flag the Admin toggles; because
+// tokens are stateless, enforcement happens via a per-request DB check in
+// Express middleware rather than instant session revocation (see §5).
+
+// NOTE: Currency — all `amount`/price fields are integer BDT (Bangladeshi Taka), no minor-unit
+// subdivision (SSLCommerz's local rails settle in whole Taka). A `currency` literal is kept on
+// BookingContract for forward-compatibility, but is not user-selectable in this project.
+//
+// NOTE: Timezone — every timestamp field below is an ISO-8601 UTC string. All `"HH:MM"` fields
+// (opening/closing/slot windows) are interpreted in Asia/Dhaka (UTC+6) at render and cutoff-
+// calculation time; the 2-hour late-pull-out and 10-minute hold-window checks always compare
+// against server UTC `now()` converted through that fixed offset, never the client's local time.
+
+export interface AttributeStat {
+  code: AttributeCode;
+  value: number;                 // 40–95 baseline; scales up to 100 once endorsementCount >= 10
+  endorsementCount: number;      // derived count of endorsements; individual endorser IDs aren't exposed to clients
+}
+
+export interface PlayerProfile {
+  id: string;                    // PlayerProfile.id
+  userId: string;                // User.id
+  fullName: string;
+  phoneOptional?: string;
+  gateways: string[];
+  customGatewayText?: string;
+  avatarUrl?: string;
+  positions: string[];           // minimum 1, maximum 3 values allowed
+  attributes: AttributeStat[];   // one entry per AttributeCode, always length 6
+  overallRating: number;
+  currentStatus: MatchStatusState;
+  cooldownExpiryTimestamp: string | null;
+  accumulatedStars: number;
+  accountStatus: AccountStatus;  // Admin moderation flag — see §5 for JWT-based enforcement
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FieldVenue {
+  id: string;
+  managerId: string;             // FK -> user with role 'turf_manager'
+  title: string;
+  shortDescription: string;
+  fullDescription: string;
+  location: string;
+  surfaceType: SurfaceType;
+  supportedFormats: PlayerFormat[];
+  amenities: string[];           // e.g. showers, locker rooms, bibs, floodlights
+  imageUrls: string[];
+  rating: number;
+  openingTime: string;           // "HH:MM" (e.g., "06:00")
+  closingTime: string;           // "HH:MM" (e.g., "23:00")
+  slotDurationMinutes: number;   // feeds the Automated Serial Grid Drop
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SlotConfiguration {
+  id: string;
+  fieldId: string;               // FK -> FieldVenue
+  startTimeWindow: string;       // Format "HH:MM" (e.g., "20:00")
+  endTimeWindow: string;         // Format "HH:MM" (e.g., "21:00")
+  timeType: SlotTimeType;        // Automated breakdown selector
+  baseStandardPrice: number;
+  promotionalOfferPrice: number | null; // Trigger for line-through styling
+  lifecycle: SlotLifecycle;             // 'available' | 'held' | 'booked'
+  holdExpiresAt: string | null;         // set while 'held'; auto-releases the slot on timeout
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BookingContract {
+  id: string;
+  slotId: string;                // FK -> SlotConfiguration (unique partial index while active)
+  scouterId: string;             // organizing player
+  playerId: string;              // agreeing player
+  status: BookingStatus;
+  agreedAt: string;
+  kickoffTimestamp: string;
+  cancelledBy?: string;          // set when a party pulls out
+  flaggedToAdmin: boolean;       // true when dropped within 2h of kickoff
+
+  // Payments (SSLCommerz)
+  amount: number;                // integer BDT
+  currency: 'BDT';
+  paymentStatus: PaymentStatus;
+  sslTranId?: string;            // SSLCommerz transaction id
+  sslBankTranId?: string;        // stored for refund calls
+  refundStatus: RefundStatus;
+  refundedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BookingMetrics {
+  // Computed aggregate returned by the analytics endpoints (§11) — not a Prisma model.
+  month: string;
+  totalBookings: number;
+  totalSpent: number;
+}
+
+export interface Review {
+  id: string;
+  authorId: string;              // player who wrote the review
+  targetType: 'venue' | 'player';
+  targetVenueId?: string;        // set when targetType === 'venue'
+  targetPlayerId?: string;       // set when targetType === 'player'
+  bookingContractId?: string;    // optional FK tying the review to a completed booking/match
+  rating: number;                // 1-5
+  comment: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Team {
+  id: string;
+  captainId: string;             // FK -> organizing player (User.id)
+  fieldId: string;                // FK -> FieldVenue (venue the match is hosted at)
+  slotId: string;                 // FK -> SlotConfiguration
+  format: PlayerFormat;
+  rosterLimit: number;            // derived from format, e.g. 5v5 -> 10, 6v6 -> 12, 7v7 -> 14
+  roster: {
+    playerId: string;
+    joinedAt: string;
+    role: 'captain' | 'member';
+  }[];
+  pendingRequests: {
+    playerId: string;
+    direction: RequestDirection;
+    status: RequestStatus;
+    createdAt: string;
+  }[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminAlert {
+  id: string;
+  type: AdminAlertType;
+  status: AdminAlertStatus;
+  subjectUserId: string;          // the flagged/reporting user
+  relatedContractId?: string;     // FK -> BookingContract, when applicable
+  details: string;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string | null;
+  resolvedByAdminId?: string | null;
+}
+
+export interface Notification {
+  id: string;
+  userId: string;                 // recipient
+  type: NotificationType;
+  message: string;
+  relatedContractId?: string;
+  read: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+---
+
+## 11. REST API Endpoint Reference
+
+**Who calls what:** see §1 "Frontend Call Routing" for which of the three frontend layers (Server Component read, `lib/api-client.ts` client write, or `lib/actions.ts` public Server Action) is responsible for each endpoint below. Short version: public GETs are Server Component reads, everything requiring `requireAuth`/`requireRole` goes through `lib/api-client.ts`, and only `/api/contact` + `/api/newsletter` (not listed below — they belong to the landing page, not a resource module) go through `lib/actions.ts`.
+
+### Response Envelope
+
+Every endpoint — success or failure — returns the same shape, per SCIC-13 §5:
+
+```json
+{
+  "success": true,
+  "message": "Booking confirmed successfully",
+  "data": { }
+}
+```
+
+On failure, `success: false`, `data` is `null` or a validation-error payload, and the HTTP status code carries the error class (`400` validation, `401` unauthenticated, `403` forbidden/wrong role/frozen account, `404` not found, `409` conflict — e.g. slot already held, `500` unexpected). A shared Express error-handling middleware (`src/lib/errorHandler.ts`) is the single place that shapes every error response so no route hand-rolls its own error JSON.
+
+### Auth Middleware Conventions
+
+* `requireAuth` — verifies the JWT access token, loads the user's current `accountStatus` from Postgres, rejects `401` if invalid/expired, `403` if `frozen`/`banned`.
+* `requireRole('turf_manager' | 'admin' | 'player')` — chained after `requireAuth`; rejects `403` on role mismatch.
+* Public routes (no `requireAuth`) are marked accordingly below.
+
+### Auth (`/api/auth`)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/api/auth/register` | Public | Create a `User` (bcrypt-hashed password), send email-verification link |
+| POST | `/api/auth/login` | Public | Verify credentials, issue access + refresh token pair |
+| POST | `/api/auth/refresh` | Refresh cookie | Rotate access token; rejects if `accountStatus` is frozen/banned |
+| POST | `/api/auth/logout` | requireAuth | Clear refresh cookie |
+| POST | `/api/auth/verify-email` | Public | Consume `EmailVerificationToken`, set `emailVerified: true` |
+| POST | `/api/auth/forgot-password` | Public | Issue `PasswordResetToken`, send reset email |
+| POST | `/api/auth/reset-password` | Public | Consume token, re-hash password with bcrypt |
+
+### Players (`/api/players`) — full CRUD + soft delete
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/players` | Public | List players (search/filter by status, position, difficulty tier) |
+| GET | `/api/players/:id` | Public | Get one player profile (§9 header data) |
+| POST | `/api/players` | requireAuth (self, once) | Create the caller's `PlayerProfile` + 6 `PlayerAttribute` rows during onboarding |
+| PATCH | `/api/players/:id` | requireAuth (self) | Update mutable fields only (`currentStatus`, `positions`); frozen `PlayerAttribute.value` fields are rejected post-commit (§4 Epic 1) |
+| POST | `/api/players/:id/endorse/:attributeCode` | requireAuth | Create an `AttributeEndorsement`; recalculates `value` once `endorsementCount >= 10` |
+| DELETE | `/api/players/:id` | requireAuth (self) or requireRole('admin') | Soft delete (`isDeleted: true`, `deletedAt: now()`) |
+
+### Venues (`/api/venues`) — full CRUD + soft delete
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/venues` | Public | `/explore` search, filter (surface, price, timeType), sort, paginate |
+| GET | `/api/venues/:id` | Public | `/explore/:id` details |
+| POST | `/api/venues` | requireRole('turf_manager') | Create `FieldVenue` |
+| PATCH | `/api/venues/:id` | requireRole('turf_manager') (owner) or requireRole('admin') | Update profile fields |
+| DELETE | `/api/venues/:id` | requireRole('turf_manager') (owner) or requireRole('admin') | Soft delete |
+
+### Slots (`/api/venues/:venueId/slots`) — full CRUD + soft delete
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/venues/:venueId/slots` | Public | List slots for a venue (feeds availability grid) |
+| GET | `/api/slots/:id` | Public | Get one slot |
+| POST | `/api/venues/:venueId/slots/generate` | requireRole('turf_manager') (owner) | Automated Serial Grid Drop — bulk-creates slots from opening/closing/duration |
+| PATCH | `/api/slots/:id` | requireRole('turf_manager') (owner) or requireRole('admin') | Inline-edit price / promo price / block |
+| DELETE | `/api/slots/:id` | requireRole('turf_manager') (owner) or requireRole('admin') | Soft delete |
+
+### Bookings (`/api/bookings`) — full CRUD + soft delete
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/bookings` | requireAuth | Caller's bookings (My Bookings / manager's Booking Confirmed Table, scoped by role) |
+| GET | `/api/bookings/:id` | requireAuth (party or admin) | Get one contract |
+| POST | `/api/bookings` | requireAuth (player) | Atomic slot claim + `pending` `BookingContract` (§6) |
+| POST | `/api/bookings/:id/checkout` | requireAuth (player) | Initiate SSLCommerz session, return `GatewayPageURL` |
+| POST | `/api/bookings/ipn` | Public (SSLCommerz server-to-server) | Validate `val_id`, flip to `paid`/`confirmed` |
+| PATCH | `/api/bookings/:id/cancel` | requireAuth (party or manager) | Refund-gated cancellation state machine (§6) |
+| DELETE | `/api/bookings/:id` | requireRole('admin') | Soft delete (administrative record cleanup only) |
+
+### Teams (`/api/teams`) — full CRUD + soft delete
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/teams` | Public | Difficulty Sorting Ladder search over organizing teams |
+| GET | `/api/teams/:id` | requireAuth | Roster + pending requests (captain/member view) |
+| POST | `/api/teams` | requireAuth (player) | Organizing player hosts a match, creates `Team` |
+| PATCH | `/api/teams/:id` | requireAuth (captain) | Update roster limit / slot |
+| POST | `/api/teams/:id/requests` | requireAuth | Create `TeamJoinRequest` (`requested` or `offered`) |
+| PATCH | `/api/teams/:id/requests/:requestId` | requireAuth (captain or target player) | Accept/decline → creates `TeamMembership` on accept |
+| DELETE | `/api/teams/:id` | requireAuth (captain) or requireRole('admin') | Soft delete |
+
+### Reviews (`/api/reviews`) — full CRUD + soft delete
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/reviews?targetVenueId=` or `?targetPlayerId=` | Public | Rating Distribution aggregator |
+| GET | `/api/reviews/:id` | Public | Single review |
+| POST | `/api/reviews` | requireAuth | Create (validates exactly one of `targetVenueId`/`targetPlayerId`) |
+| PATCH | `/api/reviews/:id` | requireAuth (author) | Edit own review |
+| DELETE | `/api/reviews/:id` | requireAuth (author) or requireRole('admin') | Soft delete |
+
+### Admin (`/api/admin`)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/admin/alerts` | requireRole('admin') | Dispute Center Desk feed |
+| PATCH | `/api/admin/alerts/:id` | requireRole('admin') | Resolve/review an `AdminAlert` |
+| PATCH | `/api/admin/users/:id/status` | requireRole('admin') | Freeze/limit/ban — flips `accountStatus` (§5) |
+
+### Public Forms (`/api/contact`, `/api/newsletter`)
+
+Called from `lib/actions.ts` (Server Action), not `lib/api-client.ts` — see §1. IP-keyed rate limiting per §5 (5 requests/hour).
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/api/contact` | Public | Contact & Support form submission |
+| POST | `/api/newsletter` | Public | Landing page newsletter signup (§5 mandatory section 7) |
+
+### Notifications (`/api/notifications`)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/notifications` | requireAuth | Caller's notifications feed |
+| PATCH | `/api/notifications/:id/read` | requireAuth (recipient) | Mark read |
+
+---
+
+## 12. Backend Project Structure (`turfifa.com-behind_the_scene` repo)
+
+Mirrors the SCIC-13 layout exactly, with one `services/<module>/` directory per resource above (8 modules — well past the required minimum of 4):
+
+```text
+turfifa.com-behind_the_scene/
+│
+├── prisma/
+│   ├── schema.prisma
+│   └── migrations/
+│
+├── src/
+│   ├── app.ts                    # Express app, middleware wiring, route mounting
+│   ├── server.ts                 # HTTP server bootstrap, reads PORT from env
+│   │
+│   ├── routes/
+│   │   ├── auth.routes.ts
+│   │   ├── players.routes.ts
+│   │   ├── venues.routes.ts
+│   │   ├── slots.routes.ts
+│   │   ├── bookings.routes.ts
+│   │   ├── teams.routes.ts
+│   │   ├── reviews.routes.ts
+│   │   ├── admin.routes.ts
+│   │   └── notifications.routes.ts
+│   │
+│   ├── services/
+│   │   ├── auth/                 # register, login, token issuance, verification, reset
+│   │   ├── player/                # profile CRUD, attribute endorsement, rating calc
+│   │   ├── venue/                 # venue CRUD, ownership checks
+│   │   ├── slot/                  # serial grid generation, timeType classification, inline edit
+│   │   ├── booking/                # atomic claim, SSLCommerz checkout/IPN, refund state machine
+│   │   ├── team/                   # roster/requests, difficulty ladder query
+│   │   ├── review/                 # review CRUD, rating aggregation
+│   │   └── admin/                  # alert queue, moderation actions
+│   │
+│   └── lib/
+│       ├── prisma.ts               # singleton PrismaClient
+│       ├── jwt.ts                  # sign/verify access + refresh tokens
+│       ├── bcrypt.ts               # hash/compare helpers
+│       ├── middleware/
+│       │   ├── requireAuth.ts
+│       │   ├── requireRole.ts
+│       │   └── rateLimit.ts        # IP-keyed limiter for public write endpoints (contact, newsletter)
+│       ├── errorHandler.ts         # shapes every error into {success:false, message, data}
+│       ├── responseEnvelope.ts     # sendSuccess()/sendError() helpers
+│       ├── sslcommerz.ts
+│       ├── cloudinary.ts
+│       └── mailer.ts               # verification/reset emails
+│
+├── .env
+├── package.json
+└── tsconfig.json
+```
+
+---
+
+## 13. Deployment & Submission Checklist (SCIC-13 §17)
+
+* **Live Backend API URL:** `turfifa.com-behind_the_scene` deployed to Render or Railway, with `prisma migrate deploy` run against the Supabase PostgreSQL instance as part of the deploy step (`migrate deploy` applies committed migrations and needs no shadow DB — unlike `migrate dev`, which is a local-only command here; see §1).
+* **GitHub Repository Link:** two repos — `turfifa.com` (frontend, this repo) and `turfifa.com-behind_the_scene` (backend) — both linked in the submission.
+* **API Documentation:** §11 above serves as the documentation source; export it (or generate via Postman/Swagger from the route definitions) as the deliverable artifact referenced in SCIC-13 §8/§17.
+* **Demo Credentials:** seeded via `prisma/seed.ts` — one `player`, one `turf_manager`, one `admin` account with known email/password, wired into the frontend's Demo Access Utility (§4 Epic 1) via the deployed backend's `/api/auth/login`.

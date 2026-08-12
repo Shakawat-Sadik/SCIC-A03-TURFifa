@@ -62,6 +62,13 @@ interface AppState {
   setUser: (user: UserData | null) => void;
   logout: () => void;
 
+  // JWT access token (turfifa-server, §11) — held in memory only, never
+  // localStorage, to limit exposure if an XSS bug slips through. Cleared on
+  // refresh/tab close; `lib/api-client.ts` re-derives it via a silent
+  // `/api/auth/refresh` call (httpOnly refresh cookie) on app load.
+  accessToken: string | null;
+  setAccessToken: (token: string | null) => void;
+
   currentView: ViewName;
   navigate: (view: ViewName) => void;
 
@@ -83,7 +90,10 @@ function applyThemeClass(theme: Theme) {
 export const useAppStore = create<AppState>((set, get) => ({
   user: null,
   setUser: (user) => set({ user }),
-  logout: () => set({ user: null, currentView: 'landing' }),
+  logout: () => set({ user: null, accessToken: null, currentView: 'landing' }),
+
+  accessToken: null,
+  setAccessToken: (token) => set({ accessToken: token }),
 
   currentView: 'landing',
   navigate: (view) => set({ currentView: view }),

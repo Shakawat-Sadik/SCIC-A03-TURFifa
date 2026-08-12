@@ -1,5 +1,24 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Installation
+
+### Frontend
+
+```bash
+pnpm install
+pnpm dev
+```
+
+### Backend
+
+```bash
+cd ../turfifa-server
+pnpm init
+pnpm install
+```
+
+Add backend scripts after the server repo is scaffolded, then run it from that separate workspace.
+
 ## Getting Started
 
 First, run the development server:

@@ -1,6 +1,6 @@
 'use client';
 
-import { motion } from 'framer-motion';
+import { motion, type Variants } from 'framer-motion';
 import { toast } from 'sonner';
 import {
   MapPin,
@@ -33,7 +33,7 @@ import {
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 
 /* ─── animation helpers ─── */
-const fadeUp = {
+const fadeUp: Variants = {
   hidden: { opacity: 0, y: 24 },
   visible: (i: number) => ({
     opacity: 1,
@@ -42,7 +42,7 @@ const fadeUp = {
   }),
 };
 
-const fadeIn = {
+const fadeIn: Variants = {
   hidden: { opacity: 0 },
   visible: (i: number) => ({
     opacity: 1,

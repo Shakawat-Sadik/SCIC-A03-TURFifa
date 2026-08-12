@@ -138,7 +138,7 @@ export function AdminDashboard() {
             ? data.alerts.map((a: Record<string, unknown>) => ({
                 ...a,
                 type: a.alertType ?? a.type,
-                userName: a.user?.name ?? a.userName,
+                userName: (a.user as { name?: string } | undefined)?.name ?? a.userName,
               }))
             : []
         );
@@ -459,7 +459,9 @@ export function AdminDashboard() {
                         paddingAngle={4}
                         dataKey="value"
                         nameKey="name"
-                        label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                        label={({ name, percent }) =>
+                          `${name} ${((percent ?? 0) * 100).toFixed(0)}%`
+                        }
                         labelLine={true}
                       >
                         {bookingStatusData.map((entry, index) => (

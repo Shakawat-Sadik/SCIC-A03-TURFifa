@@ -536,21 +536,21 @@ export function RegisterView() {
                   {ATTRIBUTES.map((attr) => (
                     <Controller
                       key={attr}
-                      name={`attributes.${attr}` as keyof RegisterFormValues}
+                      name={`attributes.${attr}` as `attributes.${string}`}
                       control={control}
                       render={({ field }) => (
                         <div className="grid gap-1.5">
                           <div className="flex items-center justify-between text-sm">
                             <span className="font-medium">{attr}</span>
                             <span className="text-muted-foreground tabular-nums">
-                              {field.value as number}
+                              {field.value}
                             </span>
                           </div>
                           <Slider
                             min={40}
                             max={95}
                             step={1}
-                            value={[field.value as number]}
+                            value={[field.value]}
                             onValueChange={([val]) => field.onChange(val)}
                           />
                         </div>

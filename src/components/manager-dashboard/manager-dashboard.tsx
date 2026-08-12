@@ -389,7 +389,7 @@ export function ManagerDashboard() {
                       tickFormatter={(v: number) => `${v / 1000}k`}
                     />
                     <Tooltip
-                      formatter={(value: number) => formatCurrency(value)}
+                      formatter={(value) => formatCurrency(Number(value))}
                       contentStyle={{ borderRadius: '8px', border: '1px solid var(--color-border, #e5e7eb)' }}
                     />
                     <Legend />
