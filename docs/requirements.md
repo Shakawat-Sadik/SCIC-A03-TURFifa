@@ -10,16 +10,19 @@ The goal is to build a polished application with clean architecture, reusable co
    Tailwind CSS
    Recharts / Chart.js
    Backend Stack:
-   Node.js and Express.js (standalone server — superseded by the hard requirement below)
+   Node.js standalone server (NOT Next.js API routes)
    TypeScript (mandatory)
    PostgreSQL with Prisma ORM, JWT authentication (bcrypt password hashing)
 
    Note: SCIC/EJP-13 (`docs/SCIC_EJP-13 Backend Project Requirements.md`) is the
-   binding backend spec for this project and takes precedence over the general
-   options listed above wherever they conflict — specifically: Express.js
-   (not Next.js API routes), PostgreSQL + Prisma ORM (not MongoDB), and JWT +
-   bcrypt (not a third-party auth library). See `Turfifa-PRD.md` §1 and §11–§13
-   for the resulting architecture.
+   binding backend spec and takes precedence over the general options above
+   wherever they conflict. The brief allows "GO / Nest.js / FastAPI / any serious
+   backend framework"; this project uses **NestJS**, not Express — see SCIC-13
+   §1.2 for the reasoning. Also binding: PostgreSQL + Prisma ORM (not MongoDB),
+   and hand-rolled JWT + bcrypt (not a third-party auth library). The project
+   ships as a Turborepo monorepo rather than two repositories (SCIC-13 §2).
+   See `Turfifa-PRD.md` §1 for the resulting architecture and SCIC-13 §11 for
+   the phased build order — Phase 1 is the submission line.
 
 2. Global UI & Design Rules
    Use a maximum of 3 primary colors (+ optional neutral color).
