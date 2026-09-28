@@ -6,16 +6,16 @@
 
 **Status:** Approved / Build Spec
 
-**Binding backend spec:** `docs/SCIC_EJP-13 Backend Project Requirements.md`
+**Binding backend spec:** `docs/Backend_design_Preplans.md`
 
 ---
 
 ## 0. Document Conventions
 
-- **`[REQUIRED]`** — mandated by SCIC-13. Must ship in Phase 1.
-- **`[EXTENSION]`** — beyond the brief, built to acquire a specific engineering skill. Phase 2 or 3. Never blocks submission.
+xxx- **`[REQUIRED]`** — mandated by SCIC-13. Must ship in Phase 1.
+xxx- **`[EXTENSION]`** — beyond the brief, built to acquire a specific engineering skill. Phase 2 or 3. Never blocks submission.
 
-Phase definitions and the skill-acquisition map live in SCIC-13 §11. The short version: **Phase 1 is the submission line.** Everything after it is upside.
+xxxPhase definitions and the skill-acquisition map live in SCIC-13 §11. The short version: **Phase 1 is the submission line.** Everything after it is upside.
 
 ---
 
@@ -23,11 +23,11 @@ Phase definitions and the skill-acquisition map live in SCIC-13 §11. The short 
 
 ### 1.1 Architectural Thesis
 
-Turfifa is a marketplace with three properties that shape every decision below:
+Turfifa is a Turf football management platform with three properties that shape every decision below:
 
 1. **Inventory is exclusive.** A time slot sells exactly once. Two people clicking "book" in the same second is not an edge case — it is the peak-hour normal case. This makes concurrency control the spine of the system, not a footnote.
-2. **Money moves through a third party.** SSLCommerz confirms payment asynchronously by webhook. The system must be correct when that webhook arrives twice, arrives late, or never arrives at all.
-3. **State is shared and time-sensitive.** A slot going from available to held is information other viewers need _now_, not on their next refresh.
+2. **Money moves through a third party.** SSLCommerz and Stripe (for Foreign account exchange) confirms payment asynchronously by webhook. The system must be correct when that webhook arrives twice, arrives late, or never arrives at all.
+3. **State is shared and time-sensitive.** A slot going from available to held is information other viewers need _now_, not on their next refresh. As the first candidate successfully send the purchase request, a 15 minutes temporary lock will be placed on that slot. If a candidate fail to process payment or The turf manager doesn't confirm candidates slot purchase within 15 minutes, then slot goes back to the pool as available.
 
 Those three facts justify the queue, the outbox, and the realtime plane respectively. Every architectural choice below traces back to one of them — nothing is here because it looked impressive on a diagram.
 
