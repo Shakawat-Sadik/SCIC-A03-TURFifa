@@ -12,10 +12,6 @@
 
 ## 0. Document Conventions
 
-xxx- **`[REQUIRED]`** — mandated by SCIC-13. Must ship in Phase 1.
-xxx- **`[EXTENSION]`** — beyond the brief, built to acquire a specific engineering skill. Phase 2 or 3. Never blocks submission.
-
-xxxPhase definitions and the skill-acquisition map live in SCIC-13 §11. The short version: **Phase 1 is the submission line.** Everything after it is upside.
 
 ---
 
