@@ -6,16 +6,14 @@
 
 **Status:** Approved / Build Spec
 
-**Binding backend spec:** `docs/SCIC_EJP-13 Backend Project Requirements.md`
+**Binding backend spec:** `docs/Backend_design_Preplans.md`
 
 ---
 
 ## 0. Document Conventions
 
-- **`[REQUIRED]`** — mandated by SCIC-13. Must ship in Phase 1.
-- **`[EXTENSION]`** — beyond the brief, built to acquire a specific engineering skill. Phase 2 or 3. Never blocks submission.
-
-Phase definitions and the skill-acquisition map live in SCIC-13 §11. The short version: **Phase 1 is the submission line.** Everything after it is upside.
+> [!WARNING]
+> **SCIC/COURSE-DRIVEN — REVIEW FOR REMOVAL:** Any block marked with this callout is intentionally retained as written for assignment/rubric/submission alignment, but should be reviewed later to decide whether it belongs in the long-term Turfifa product spec.
 
 ---
 
@@ -23,11 +21,11 @@ Phase definitions and the skill-acquisition map live in SCIC-13 §11. The short 
 
 ### 1.1 Architectural Thesis
 
-Turfifa is a marketplace with three properties that shape every decision below:
+Turfifa is a Turf football management platform with three properties that shape every decision below:
 
 1. **Inventory is exclusive.** A time slot sells exactly once. Two people clicking "book" in the same second is not an edge case — it is the peak-hour normal case. This makes concurrency control the spine of the system, not a footnote.
-2. **Money moves through a third party.** SSLCommerz confirms payment asynchronously by webhook. The system must be correct when that webhook arrives twice, arrives late, or never arrives at all.
-3. **State is shared and time-sensitive.** A slot going from available to held is information other viewers need _now_, not on their next refresh.
+2. **Money moves through third parties.** SSLCommerz and Stripe (for international cards) confirm payment asynchronously by webhook. The system must be correct when that webhook arrives twice, arrives late, or never arrives at all.
+3. **State is shared and time-sensitive.** A slot going from available to held is information other viewers need _now_, not on their next refresh. On checkout, an atomic claim places the slot in `HELD` for 10 minutes, tied to the pending transaction; if payment validation never arrives, the expiry job returns it to `AVAILABLE`. As the 10 minutes payment window closes, The payment won't be accepted.
 
 Those three facts justify the queue, the outbox, and the realtime plane respectively. Every architectural choice below traces back to one of them — nothing is here because it looked impressive on a diagram.
 
@@ -52,6 +50,9 @@ turfifa/
 └── docs/
 ```
 
+> [!WARNING]
+> **SCIC/COURSE-DRIVEN — REVIEW FOR REMOVAL:** The single-repo rationale below is explicitly tied to grader/submission handling.
+
 Graders receive one repository link containing both frontend and backend, satisfying the submission requirement.
 
 ### 1.3 Frontend — `apps/web`
@@ -67,6 +68,9 @@ Graders receive one repository link containing both frontend and backend, satisf
 - **Payments:** Stripe.js + Stripe Elements for international card collection (card details never touch the server). SSLCommerz redirect handles all domestic methods. Gateway is chosen before the Stripe Element mounts so the wrong SDK is never loaded.
 
 ### 1.4 Backend — `apps/api` (NestJS)
+
+> [!WARNING]
+> **SCIC/COURSE-DRIVEN — REVIEW FOR REMOVAL:** The SCIC-13 references and "mandated" transport/auth wording below are preserved for assignment compliance traceability and may not all be core product constraints.
 
 - **Runtime:** NestJS 11 on Node.js 22 with the Fastify adapter, TypeScript strict.
 - **Database:** PostgreSQL 16 on **Supabase**, used strictly as a Postgres host — not its Auth, not its Storage, not its auto-generated REST API. Auth is hand-rolled JWT (SCIC-13 §4 requires exactly that), media is Cloudinary, all access is via Prisma. Supabase's own `auth`/`storage` schemas are untouched; Prisma manages only `public`.
@@ -174,6 +178,9 @@ The second half is what separates it from a generic booking app. Anyone can list
 - **Locked parameter rating system.** Players define six baseline attributes at registration: Attack (ATT), Passing (PAS), Strength/Stamina (STA), Speed (SPE), Technical/Dribbling (TEC), Defense (DEF).
   - _Gatekeeper range rule:_ self-assigned values are capped at **40–95**. An attribute reaches up to **100** only after accumulating **10 unique verified endorsements** from matches actually played.
   - _Modification prevention:_ once committed, values freeze. A late submission attempt returns an explicit warning directing the user to file an admin adjustment dispute. Server-side, `PATCH /api/players/:id` rejects any attempt to write `PlayerAttribute.value` post-commit — the freeze is enforced in the service, not just hidden in the UI.
+
+> [!WARNING]
+> **SCIC/COURSE-DRIVEN — REVIEW FOR REMOVAL:** Reviewer/demo-account access and SCIC-13-specific auth trace wording below are likely course-deliverable framing rather than core product requirements.
 
 - **Demo access utility** — one-click "Demo Player," "Demo Manager," and "Demo Admin" buttons that auto-fill seeded credentials, so a reviewer can evaluate all three role classes in under a minute.
 
@@ -435,6 +442,9 @@ Phase 1 chat requires zero additional paid services. Polling is client-driven; t
 
 **Chat drawer** — not a route; a persistent `<Sheet side="right">` overlay accessible from any page via the navbar chat icon. Contains global, club, and DM tabs (§8.5).
 
+> [!WARNING]
+> **SCIC/COURSE-DRIVEN — REVIEW FOR REMOVAL:** The explicit route-count/layout compliance targets and mandatory-section/minimum-field counts in this block are framed as assignment constraints.
+
 Navbar shows a minimum of 3 routes logged out and 5+ logged in, satisfying the layout requirement.
 
 ### 5.2 Public Layer
@@ -502,6 +512,9 @@ Present on every route, with **zero `#` placeholder links**: site map (Home, Exp
 - **Queue dashboard** `[EXTENSION]` — Bull Board at `/admin/queues`.
 
 ### 5.9 Notifications
+
+> [!WARNING]
+> **SCIC/COURSE-DRIVEN — REVIEW FOR REMOVAL:** The "required by the brief" scope limitation below is a course/brief framing constraint.
 
 In-app only for MVP — the `[Match 🔔]` navbar badge and dashboard toasts. No email or push notifications are required by the brief. `Notification` rows are created server-side whenever a contract is confirmed, cancelled, or refunded, or an endorsement is requested. Phase 1 fetches them via React Query with a polling interval; Phase 3 replaces polling with a server push over WebSocket.
 
@@ -818,7 +831,13 @@ Lives in `packages/db/prisma/schema.prisma` — owned by the shared package, not
 
 Fully normalised: real foreign keys, explicit join tables, and native Postgres enums. Soft delete (`isDeleted` + `deletedAt`) and `createdAt`/`updatedAt` on every primary entity. Pure join and audit rows — memberships, endorsements, tokens, outbox, deliveries — are hard-deleted by design, because they carry no independent meaning; soft-deleting the parent is what matters, and blanket soft delete on join tables quietly breaks uniqueness constraints.
 
+> [!WARNING]
+> **SCIC/COURSE-DRIVEN — REVIEW FOR REMOVAL:** The explicit compliance minimum counts below (modules/enums) are rubric-driven targets.
+
 **Compliance:** 10 domain modules (minimum 4), 22 enums (minimum 2), full relational modelling, soft delete, timestamps, and `@@map()` throughout.
+
+> [!WARNING]
+> **SCIC/COURSE-DRIVEN — REVIEW FOR REMOVAL:** The embedded schema comments below include explicit SCIC-13 traceability notes retained for course mapping.
 
 ```prisma
 // packages/db/prisma/schema.prisma
@@ -1682,6 +1701,9 @@ The browser gets instant field-level validation and the server independently re-
 
 ### 11.1 Two Surfaces, One Service Layer
 
+> [!WARNING]
+> **SCIC/COURSE-DRIVEN — REVIEW FOR REMOVAL:** The REST "REQUIRED" framing tied to grader consumption below is assignment-deliverable language.
+
 | Surface                | Path      | Consumers                                                        |
 | ---------------------- | --------- | ---------------------------------------------------------------- |
 | **REST** `[REQUIRED]`  | `/api/*`  | Graders, Server Component reads, SSLCommerz IPN, future partners |
@@ -1958,6 +1980,9 @@ The concurrency test is the single most valuable test in the suite. It is the ex
 
 ## 14. Deployment & Submission
 
+> [!WARNING]
+> **SCIC/COURSE-DRIVEN — REVIEW FOR REMOVAL:** The submission checklist and SCIC phase/submission line discipline in this section are primarily grading/deployment-deliverable constraints.
+
 | Artifact         | Target                                           |
 | ---------------- | ------------------------------------------------ |
 | `apps/web`       | Vercel — deploys on merge to `main`              |
@@ -1986,6 +2011,9 @@ _IPv6 caveat:_ Supabase direct connections are IPv6-only unless the IPv4 add-on 
 ---
 
 ## 15. Build Order
+
+> [!WARNING]
+> **SCIC/COURSE-DRIVEN — REVIEW FOR REMOVAL:** The SCIC-13 phase map, submission-line statusing, and grade/interview framing below are assignment-scope planning constraints.
 
 Full phase definitions and the skill-acquisition map are in **SCIC-13 §11**. Summary:
 
